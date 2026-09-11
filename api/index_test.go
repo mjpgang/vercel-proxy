@@ -420,6 +420,86 @@ func TestProxyRejectsRedirectOutsideWhitelist(t *testing.T) {
 	}
 }
 
+func TestProxyKeepsRelativeRedirectInsideProxy(t *testing.T) {
+	var requests int
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.URL.Path != "/" {
+			t.Fatalf("Path = %q, want %q", r.URL.Path, "/")
+		}
+		http.Redirect(w, r, "/results?search_query=%40&themeRefresh=1", http.StatusFound)
+	}))
+	defer upstream.Close()
+
+	proxy, err := NewProxy(Config{})
+	if err != nil {
+		t.Fatalf("NewProxy() error = %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/"+upstream.URL, nil)
+	recorder := httptest.NewRecorder()
+
+	proxy.ServeHTTP(recorder, req)
+
+	resp := recorder.Result()
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusFound)
+	}
+	wantLocation := "/" + upstream.URL + "/results?search_query=%40&themeRefresh=1"
+	if got := resp.Header.Get("Location"); got != wantLocation {
+		t.Fatalf("Location = %q, want %q", got, wantLocation)
+	}
+	if requests != 1 {
+		t.Fatalf("upstream requests = %d, want 1", requests)
+	}
+}
+
+func TestRandomProxyKeepsRelativeRedirectInsideProxy(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/results?search_query=%40&themeRefresh=1", http.StatusFound)
+	}))
+	defer upstream.Close()
+
+	proxy, err := NewProxy(Config{})
+	if err != nil {
+		t.Fatalf("NewProxy() error = %v", err)
+	}
+
+	createReq := httptest.NewRequest(
+		http.MethodGet,
+		"/create?url="+url.QueryEscape(upstream.URL),
+		nil,
+	)
+	createRecorder := httptest.NewRecorder()
+	proxy.ServeHTTP(createRecorder, createReq)
+
+	var created struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(createRecorder.Result().Body).Decode(&created); err != nil {
+		t.Fatalf("create response error = %v", err)
+	}
+	if created.ID == "" {
+		t.Fatal("create response has empty id")
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/"+created.ID, nil)
+	recorder := httptest.NewRecorder()
+	proxy.ServeHTTP(recorder, req)
+
+	resp := recorder.Result()
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusFound)
+	}
+	wantLocation := "/" + created.ID + "/results?search_query=%40&themeRefresh=1"
+	if got := resp.Header.Get("Location"); got != wantLocation {
+		t.Fatalf("Location = %q, want %q", got, wantLocation)
+	}
+}
+
 func assertUpstreamErr(t *testing.T, upstreamErr <-chan error) {
 	t.Helper()
 

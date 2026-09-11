@@ -1513,9 +1513,11 @@ func (p *Proxy) checkRedirect(
 		)
 	}
 
-	return p.checkDomain(
-		req.URL,
-	)
+	if err := p.checkDomain(req.URL); err != nil {
+		return err
+	}
+
+	return http.ErrUseLastResponse
 }
 
 type domainNotAllowedError struct {
