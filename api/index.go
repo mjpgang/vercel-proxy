@@ -1077,6 +1077,8 @@ func decodeResponseBody(resp *http.Response) ([]byte, error) {
 func rewriteHTMLNodes(node *html.Node, baseURL *url.URL, randomID string) {
 	if node.Type == html.TextNode && node.Parent != nil && strings.EqualFold(node.Parent.Data, "style") {
 		node.Data = string(rewriteCSS([]byte(node.Data), baseURL, randomID))
+	} else if node.Type == html.TextNode && node.Parent != nil && strings.EqualFold(node.Parent.Data, "script") {
+		node.Data = rewriteScriptURLs(node.Data, baseURL, randomID)
 	}
 	if node.Type == html.ElementNode {
 		for i := range node.Attr {
@@ -1092,6 +1094,15 @@ func rewriteHTMLNodes(node *html.Node, baseURL *url.URL, randomID string) {
 	for child := node.FirstChild; child != nil; child = child.NextSibling {
 		rewriteHTMLNodes(child, baseURL, randomID)
 	}
+}
+
+var scriptRootURLPattern = regexp.MustCompile(`(["'` + "`" + `])(/[^/][^/"'` + "`" + `]*)["'` + "`" + `]`)
+
+func rewriteScriptURLs(value string, baseURL *url.URL, randomID string) string {
+	return scriptRootURLPattern.ReplaceAllStringFunc(value, func(match string) string {
+		parts := scriptRootURLPattern.FindStringSubmatch(match)
+		return parts[1] + proxyReference(parts[2], baseURL, randomID) + match[len(match)-1:]
+	})
 }
 
 func rewriteSrcset(value string, baseURL *url.URL, randomID string) string {

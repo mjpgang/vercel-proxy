@@ -579,6 +579,34 @@ func TestProxyRewritesDocumentReferencesCookiesAndRefresh(t *testing.T) {
 	}
 }
 
+func TestProxyRewritesRootRelativeScriptURLs(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = io.WriteString(w, `<script>window.location.href="/results?search_query=t&themeRefresh=1"</script>`)
+	}))
+	defer upstream.Close()
+
+	proxy, err := NewProxy(Config{})
+	if err != nil {
+		t.Fatalf("NewProxy() error = %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/"+upstream.URL, nil)
+	recorder := httptest.NewRecorder()
+	proxy.ServeHTTP(recorder, req)
+
+	resp := recorder.Result()
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("ReadAll() error = %v", err)
+	}
+	want := `/` + upstream.URL + `/results?search_query=t&themeRefresh=1`
+	if !strings.Contains(string(body), want) {
+		t.Fatalf("body does not contain rewritten script URL %q: %s", want, body)
+	}
+}
+
 func assertUpstreamErr(t *testing.T, upstreamErr <-chan error) {
 	t.Helper()
 
