@@ -1,7 +1,8 @@
 package api
 
 import (
-	_ "embed"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,7 +14,6 @@ import (
 	"regexp"
 	"strings"
 	"sync"
-	"time"
 )
 
 const (
@@ -25,32 +25,462 @@ const (
 	corsAllowHeaders = "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, X-PROXY-HOST, X-PROXY-SCHEME"
 )
 
-//go:embed index.html
-var indexHTML []byte
-
 var (
 	proxyURLPattern = regexp.MustCompile(`^/*(https?:)/*`)
 	defaultProxy    = mustNewProxy(Config{})
+
+	randomTargets   = make(map[string]string)
+	randomTargetsMu sync.RWMutex
 )
 
-// ランダムURL → 元URL
-var randomTargets = struct {
-	sync.RWMutex
-	m map[string]string
-}{
-	m: make(map[string]string),
+const indexHTML = `<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#000000">
+<title>Koyota HUB</title>
+
+<style>
+:root{
+	--bg:#000;
+	--panel:#080808;
+	--panel2:#0d0d0d;
+	--line:#252525;
+	--line2:#333;
+	--text:#f4f4f4;
+	--muted:#777;
+	--muted2:#555;
+	--accent:#fff;
 }
 
-const randomIDLength = 10
+*{
+	box-sizing:border-box;
+	margin:0;
+	padding:0;
+}
+
+html,body{
+	width:100%;
+	min-height:100%;
+	background:var(--bg);
+	color:var(--text);
+	font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+}
+
+body{
+	min-height:100vh;
+	display:flex;
+	justify-content:center;
+}
+
+button,input{
+	font:inherit;
+}
+
+a{
+	color:inherit;
+	text-decoration:none;
+}
+
+.wrap{
+	width:min(1080px,100%);
+	padding:28px 22px 70px;
+}
+
+.top{
+	display:flex;
+	align-items:center;
+	justify-content:space-between;
+	border-bottom:1px solid var(--line);
+	padding-bottom:20px;
+}
+
+.logo{
+	font-size:18px;
+	font-weight:700;
+	letter-spacing:-.5px;
+}
+
+.logo span{
+	color:var(--muted);
+	font-weight:400;
+}
+
+.status{
+	display:flex;
+	align-items:center;
+	gap:8px;
+	color:var(--muted);
+	font-size:12px;
+}
+
+.dot{
+	width:7px;
+	height:7px;
+	border-radius:50%;
+	background:#fff;
+	box-shadow:0 0 10px rgba(255,255,255,.5);
+}
+
+.hero{
+	padding:90px 0 70px;
+}
+
+.hero small{
+	color:var(--muted);
+	font-size:12px;
+	letter-spacing:2px;
+	text-transform:uppercase;
+}
+
+.hero h1{
+	margin-top:16px;
+	font-size:clamp(46px,9vw,96px);
+	line-height:.9;
+	letter-spacing:-6px;
+	font-weight:800;
+}
+
+.hero p{
+	margin-top:28px;
+	max-width:620px;
+	color:#888;
+	font-size:15px;
+	line-height:1.8;
+}
+
+.box{
+	margin-top:45px;
+	border:1px solid var(--line);
+	background:linear-gradient(180deg,#090909,#050505);
+}
+
+.input-row{
+	display:flex;
+	align-items:stretch;
+}
+
+.input{
+	flex:1;
+	min-width:0;
+	padding:20px;
+	border:0;
+	outline:0;
+	background:transparent;
+	color:#fff;
+	font-size:15px;
+}
+
+.input::placeholder{
+	color:#555;
+}
+
+.open{
+	border:0;
+	border-left:1px solid var(--line);
+	background:#fff;
+	color:#000;
+	padding:0 28px;
+	font-weight:700;
+	cursor:pointer;
+	transition:.15s;
+}
+
+.open:hover{
+	background:#ddd;
+}
+
+.open:active{
+	transform:scale(.99);
+}
+
+.message{
+	padding:0 20px 16px;
+	color:#777;
+	font-size:12px;
+}
+
+.error{
+	color:#ff6b6b;
+}
+
+.section{
+	margin-top:20px;
+	border-top:1px solid var(--line);
+}
+
+.section-title{
+	padding:18px 0;
+	color:#666;
+	font-size:11px;
+	letter-spacing:2px;
+	text-transform:uppercase;
+}
+
+.row{
+	display:flex;
+	align-items:center;
+	justify-content:space-between;
+	gap:20px;
+	padding:19px 0;
+	border-top:1px solid var(--line);
+}
+
+.row-left{
+	display:flex;
+	flex-direction:column;
+	gap:5px;
+}
+
+.row-name{
+	font-size:14px;
+}
+
+.row-desc{
+	color:#666;
+	font-size:12px;
+}
+
+.row-link{
+	color:#aaa;
+	font-size:12px;
+	transition:.15s;
+}
+
+.row-link:hover{
+	color:#fff;
+}
+
+.footer{
+	margin-top:80px;
+	padding-top:20px;
+	border-top:1px solid var(--line);
+	display:flex;
+	justify-content:space-between;
+	gap:20px;
+	color:#555;
+	font-size:11px;
+}
+
+@media(max-width:600px){
+	.wrap{
+		padding:20px 16px 50px;
+	}
+
+	.hero{
+		padding:65px 0 50px;
+	}
+
+	.hero h1{
+		letter-spacing:-3px;
+	}
+
+	.input-row{
+		flex-direction:column;
+	}
+
+	.open{
+		border-left:0;
+		border-top:1px solid var(--line);
+		padding:17px;
+	}
+
+	.row{
+		align-items:flex-start;
+	}
+
+	.footer{
+		flex-direction:column;
+	}
+}
+</style>
+</head>
+
+<body>
+<div class="wrap">
+
+	<header class="top">
+		<div class="logo">
+			Koyota <span>HUB.</span>
+		</div>
+
+		<div class="status">
+			<span class="dot"></span>
+			<span>ONLINE</span>
+		</div>
+	</header>
+
+	<main>
+
+		<section class="hero">
+			<small>WEB PROXY</small>
+
+			<h1>Koyota<br>HUB.</h1>
+
+			<p>
+				Enter a URL below and open it through the proxy.
+				A temporary random access URL will be generated automatically.
+			</p>
+
+			<div class="box">
+				<div class="input-row">
+					<input
+						id="url"
+						class="input"
+						type="text"
+						placeholder="https://example.com"
+						autocomplete="off"
+						spellcheck="false"
+					>
+
+					<button id="open" class="open">
+						OPEN
+					</button>
+				</div>
+
+				<div id="message" class="message">
+					Ready.
+				</div>
+			</div>
+		</section>
+
+		<section class="section">
+
+			<div class="section-title">
+				Quick access
+			</div>
+
+			<div class="row">
+				<div class="row-left">
+					<div class="row-name">Example</div>
+					<div class="row-desc">
+						Open example.com through the proxy
+					</div>
+				</div>
+
+				<a
+					class="row-link"
+					href="/https://example.com"
+				>
+					OPEN →
+				</a>
+			</div>
+
+			<div class="row">
+				<div class="row-left">
+					<div class="row-name">Proxy format</div>
+					<div class="row-desc">
+						Direct proxy URLs remain supported
+					</div>
+				</div>
+
+				<div class="row-link">
+					/https://...
+				</div>
+			</div>
+
+		</section>
+
+	</main>
+
+	<footer class="footer">
+		<span>Koyota HUB</span>
+		<span>Powered by vercel-proxy</span>
+	</footer>
+
+</div>
+
+<script>
+const input = document.getElementById("url");
+const openButton = document.getElementById("open");
+const message = document.getElementById("message");
+
+function setMessage(text, error){
+	message.textContent = text;
+	message.className = error ? "message error" : "message";
+}
+
+function normalizeURL(value){
+	value = value.trim();
+
+	if(!value){
+		throw new Error("URLを入力してください");
+	}
+
+	if(!/^https?:\/\//i.test(value)){
+		value = "https://" + value;
+	}
+
+	const parsed = new URL(value);
+
+	if(
+		parsed.protocol !== "http:" &&
+		parsed.protocol !== "https:"
+	){
+		throw new Error("HTTP / HTTPS のURLのみ使用できます");
+	}
+
+	return parsed.href;
+}
+
+async function openProxy(){
+	try{
+		const target = normalizeURL(input.value);
+
+		openButton.disabled = true;
+		openButton.textContent = "CREATING";
+		setMessage("Creating random proxy URL...", false);
+
+		const response = await fetch(
+			"/create?url=" + encodeURIComponent(target),
+			{
+				method:"GET",
+				cache:"no-store"
+			}
+		);
+
+		if(!response.ok){
+			throw new Error(
+				await response.text() || "Failed to create URL"
+			);
+		}
+
+		const data = await response.json();
+
+		if(!data.url){
+			throw new Error("Invalid server response");
+		}
+
+		setMessage("Opening...", false);
+
+		location.href = data.url;
+
+	}catch(error){
+		setMessage(error.message || "Failed to create proxy URL", true);
+
+		openButton.disabled = false;
+		openButton.textContent = "OPEN";
+	}
+}
+
+openButton.addEventListener("click", openProxy);
+
+input.addEventListener("keydown", function(event){
+	if(event.key === "Enter"){
+		openProxy();
+	}
+});
+</script>
+
+</body>
+</html>`
 
 type Config struct {
-	Socks5Proxy string `json:"socks5Proxy,omitempty"`
-
-	DomainWhitelist []string `json:"domainWhitelist,omitempty"`
-
-	DisableCompression bool `json:"disableCompression,omitempty"`
-
-	DisableGlobalCORS bool `json:"disableGlobalCors,omitempty"`
+	Socks5Proxy         string   `json:"socks5Proxy,omitempty"`
+	DomainWhitelist     []string `json:"domainWhitelist,omitempty"`
+	DisableCompression  bool     `json:"disableCompression,omitempty"`
+	DisableGlobalCORS  bool     `json:"disableGlobalCors,omitempty"`
 }
 
 type Proxy struct {
@@ -80,19 +510,10 @@ func NewProxy(config Config) (*Proxy, error) {
 
 func mustNewProxy(config Config) *Proxy {
 	proxy, err := NewProxy(config)
-
 	if err != nil {
 		panic(err)
 	}
-
 	return proxy
-}
-
-func internalServerError(w http.ResponseWriter, err error) {
-	if err != nil {
-		log.Printf("Internal server error: %v", err.Error())
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-	}
 }
 
 func Handler(w http.ResponseWriter, r *http.Request) {
@@ -100,7 +521,6 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-
 	defer func() {
 		if err := recover(); err != nil {
 			log.Printf("WithHandler panic: %v", err)
@@ -113,7 +533,6 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	if p.globalCORS {
-
 		setCORSHeaders(w)
 
 		if r.Method == http.MethodOptions {
@@ -123,168 +542,42 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	/*
-	 * トップページ
-	 */
+		トップページ
+	*/
 	if r.URL.Path == "/" {
-
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-
-		_, err := w.Write(indexHTML)
-
-		if err != nil {
-			log.Printf("index response error: %v", err)
-		}
-
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, indexHTML)
 		return
 	}
 
 	/*
-	 * ランダムURL作成
-	 *
-	 * /create?url=https://example.com
-	 */
+		ランダムURL生成
+		/create?url=https://example.com
+	*/
 	if r.URL.Path == "/create" {
-
-		target := r.URL.Query().Get("url")
-
-		targetURL, err := parseTargetURL(target)
-
-		if err != nil {
-			http.Error(
-				w,
-				"invalid url",
-				http.StatusBadRequest,
-			)
-			return
-		}
-
-		if err := p.checkDomain(targetURL); err != nil {
-			http.Error(
-				w,
-				err.Error(),
-				http.StatusForbidden,
-			)
-			return
-		}
-
-		id := newRandomID()
-
-		randomTargets.Lock()
-		randomTargets.m[id] = targetURL.String()
-		randomTargets.Unlock()
-
-		/*
-		 * 古いURLを定期的に消す。
-		 * 簡易実装なので一定時間後に削除。
-		 */
-		go func(id string) {
-
-			time.Sleep(30 * time.Minute)
-
-			randomTargets.Lock()
-			delete(randomTargets.m, id)
-			randomTargets.Unlock()
-
-		}(id)
-
-		response := map[string]string{
-			"id":  id,
-			"url": "/" + id,
-		}
-
-		w.Header().Set(
-			"Content-Type",
-			"application/json; charset=utf-8",
-		)
-
-		json.NewEncoder(w).Encode(response)
-
+		p.handleCreate(w, r)
 		return
 	}
 
 	/*
-	 * ランダムURL
-	 *
-	 * /Ab7xK92LmQ
-	 * /Ab7xK92LmQ/some/path
-	 */
-	if targetURL, ok := resolveRandomTarget(r.URL.Path); ok {
-
-		targetURL, err := url.Parse(targetURL)
-
-		if err != nil {
-			http.Error(
-				w,
-				"invalid target",
-				http.StatusBadRequest,
-			)
-			return
-		}
-
-		/*
-		 * ランダムIDの後ろにパスがあれば追加。
-		 */
-		id := strings.TrimPrefix(r.URL.Path, "/")
-
-		randomTargets.RLock()
-
-		for key, base := range randomTargets.m {
-
-			if id == key {
-				_ = base
-				break
-			}
-
-			prefix := key + "/"
-
-			if strings.HasPrefix(id, prefix) {
-
-				extra := strings.TrimPrefix(
-					id,
-					prefix,
-				)
-
-				if extra != "" {
-
-					targetURL.Path =
-						strings.TrimRight(
-							targetURL.Path,
-							"/",
-						) +
-						"/" +
-						extra
-				}
-
-				break
-			}
-		}
-
-		randomTargets.RUnlock()
-
-		if r.URL.RawQuery != "" {
-			targetURL.RawQuery = r.URL.RawQuery
-		}
-
-		if err := p.proxyRequest(
-			w,
-			r,
-			targetURL,
-		); err != nil {
-			internalServerError(w, err)
-		}
-
+		ランダムURL
+		例:
+		/aK7xP92LmQ
+	*/
+	if target, ok := getRandomTarget(r.URL.Path); ok {
+		p.serveTarget(w, r, target)
 		return
 	}
 
 	/*
-	 * 従来方式
-	 *
-	 * /https://example.com
-	 */
+		従来形式:
+		/https://example.com
+	*/
 	rawURL := proxyURL(r)
 
 	targetURL, err := parseTargetURL(rawURL)
-
 	if err != nil {
 		http.Error(
 			w,
@@ -295,83 +588,112 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := p.checkDomain(targetURL); err != nil {
-		http.Error(
-			w,
-			err.Error(),
-			http.StatusForbidden,
-		)
+		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
 
-	if err := p.proxyRequest(
-		w,
-		r,
-		targetURL,
-	); err != nil {
-		internalServerError(w, err)
-	}
+	p.proxyRequest(w, r, targetURL)
 }
 
-func resolveRandomTarget(path string) (string, bool) {
+func (p *Proxy) handleCreate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 
-	path = strings.TrimPrefix(path, "/")
+	rawTarget := strings.TrimSpace(r.URL.Query().Get("url"))
 
-	if path == "" {
+	if rawTarget == "" {
+		http.Error(w, "missing url", http.StatusBadRequest)
+		return
+	}
+
+	targetURL, err := parseTargetURL(rawTarget)
+	if err != nil {
+		http.Error(w, "invalid url", http.StatusBadRequest)
+		return
+	}
+
+	if err := p.checkDomain(targetURL); err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
+
+	id, err := newRandomID()
+	if err != nil {
+		http.Error(w, "failed to generate id", http.StatusInternalServerError)
+		return
+	}
+
+	randomTargetsMu.Lock()
+	randomTargets[id] = targetURL.String()
+	randomTargetsMu.Unlock()
+
+	response := map[string]string{
+		"id":  id,
+		"url": "/" + id,
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+
+	_ = json.NewEncoder(w).Encode(response)
+}
+
+func newRandomID() (string, error) {
+	b := make([]byte, 8)
+
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+
+	return hex.EncodeToString(b)[:12], nil
+}
+
+func getRandomTarget(path string) (string, bool) {
+	id := strings.Trim(path, "/")
+
+	if id == "" || strings.Contains(id, "/") {
 		return "", false
 	}
 
-	id := path
-
-	if idx := strings.IndexByte(id, '/'); idx >= 0 {
-		id = id[:idx]
-	}
-
-	randomTargets.RLock()
-	target, ok := randomTargets.m[id]
-	randomTargets.RUnlock()
+	randomTargetsMu.RLock()
+	target, ok := randomTargets[id]
+	randomTargetsMu.RUnlock()
 
 	return target, ok
 }
 
-func newRandomID() string {
-
-	const chars =
-		"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-
-	for {
-
-		b := make([]byte, randomIDLength)
-
-		for i := range b {
-			b[i] = chars[
-				time.Now().UnixNano()%int64(len(chars)),
-			]
-
-			time.Sleep(time.Nanosecond)
-		}
-
-		id := string(b)
-
-		randomTargets.RLock()
-		_, exists := randomTargets.m[id]
-		randomTargets.RUnlock()
-
-		if !exists {
-			return id
-		}
+func (p *Proxy) serveTarget(
+	w http.ResponseWriter,
+	r *http.Request,
+	target string,
+) {
+	targetURL, err := parseTargetURL(target)
+	if err != nil {
+		http.Error(w, "invalid target", http.StatusBadRequest)
+		return
 	}
+
+	if err := p.checkDomain(targetURL); err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
+
+	/*
+		ランダムURLにさらにパスを付けた場合、
+		元URLのパスに追加するのではなく、
+		保存したURLをそのまま使う。
+	*/
+	p.proxyRequest(w, r, targetURL)
 }
 
 func (p *Proxy) proxyRequest(
 	w http.ResponseWriter,
 	r *http.Request,
 	targetURL *url.URL,
-) error {
-
-	if err := p.checkDomain(targetURL); err != nil {
-		return err
-	}
-
+) {
 	req, err := http.NewRequestWithContext(
 		r.Context(),
 		r.Method,
@@ -380,7 +702,8 @@ func (p *Proxy) proxyRequest(
 	)
 
 	if err != nil {
-		return err
+		internalServerError(w, err)
+		return
 	}
 
 	copyHeaders(r.Header, req.Header)
@@ -400,20 +723,25 @@ func (p *Proxy) proxyRequest(
 				domainErr.Error(),
 				http.StatusForbidden,
 			)
-			return nil
+			return
 		}
 
-		return err
+		internalServerError(w, err)
+		return
 	}
 
 	defer closeResponseBody(resp)
 
-	return proxyRaw(
-		w,
-		resp,
-		r,
-		p.globalCORS,
-	)
+	if err := proxyRaw(w, resp, r, p.globalCORS); err != nil {
+		log.Printf("Proxy response error: %v", err)
+	}
+}
+
+func internalServerError(w http.ResponseWriter, err error) {
+	if err != nil {
+		log.Printf("Internal server error: %v", err.Error())
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
 }
 
 func proxyRaw(
@@ -422,7 +750,6 @@ func proxyRaw(
 	req *http.Request,
 	globalCORS bool,
 ) error {
-
 	copyHeaders(resp.Header, w.Header())
 
 	if globalCORS {
@@ -437,20 +764,34 @@ func proxyRaw(
 	w.WriteHeader(resp.StatusCode)
 
 	_, err := io.Copy(w, resp.Body)
-
 	return err
 }
 
 func setCORSHeaders(w http.ResponseWriter) {
 	clearCORSHeaders(w.Header())
-	w.Header().Set("Access-Control-Allow-Origin", corsAllowOrigin)
-	w.Header().Set("Access-Control-Allow-Methods", corsAllowMethods)
-	w.Header().Set("Access-Control-Allow-Headers", corsAllowHeaders)
+
+	w.Header().Set(
+		"Access-Control-Allow-Origin",
+		corsAllowOrigin,
+	)
+
+	w.Header().Set(
+		"Access-Control-Allow-Methods",
+		corsAllowMethods,
+	)
+
+	w.Header().Set(
+		"Access-Control-Allow-Headers",
+		corsAllowHeaders,
+	)
 }
 
 func clearCORSHeaders(header http.Header) {
 	for k := range header {
-		if strings.HasPrefix(strings.ToLower(k), "access-control-") {
+		if strings.HasPrefix(
+			strings.ToLower(k),
+			"access-control-",
+		) {
 			header.Del(k)
 		}
 	}
@@ -470,7 +811,6 @@ func proxyURL(r *http.Request) string {
 }
 
 func parseTargetURL(rawURL string) (*url.URL, error) {
-
 	targetURL, err := url.Parse(rawURL)
 
 	if err != nil {
@@ -480,7 +820,6 @@ func parseTargetURL(rawURL string) (*url.URL, error) {
 	if targetURL.Host == "" ||
 		(targetURL.Scheme != "http" &&
 			targetURL.Scheme != "https") {
-
 		return nil, fmt.Errorf(
 			"unsupported target url: %s",
 			rawURL,
@@ -499,10 +838,7 @@ func copyHeaders(src, dst http.Header) {
 }
 
 func disableUpstreamCompression(header http.Header) {
-	header.Set(
-		"Accept-Encoding",
-		identityEncoding,
-	)
+	header.Set("Accept-Encoding", identityEncoding)
 }
 
 func closeResponseBody(resp *http.Response) {
@@ -515,23 +851,20 @@ func closeResponseBody(resp *http.Response) {
 }
 
 func newHTTPClient(socks5Proxy string) (*http.Client, error) {
-
-	transport :=
-		http.DefaultTransport.(*http.Transport).Clone()
+	transport := http.DefaultTransport.
+		(*http.Transport).
+		Clone()
 
 	transport.Proxy = nil
 
 	if strings.TrimSpace(socks5Proxy) != "" {
-
-		proxyURL, err :=
-			parseSocks5ProxyURL(socks5Proxy)
+		proxyURL, err := parseSocks5ProxyURL(socks5Proxy)
 
 		if err != nil {
 			return nil, err
 		}
 
-		transport.Proxy =
-			http.ProxyURL(proxyURL)
+		transport.Proxy = http.ProxyURL(proxyURL)
 	}
 
 	return &http.Client{
@@ -540,7 +873,6 @@ func newHTTPClient(socks5Proxy string) (*http.Client, error) {
 }
 
 func parseSocks5ProxyURL(rawProxy string) (*url.URL, error) {
-
 	rawProxy = strings.TrimSpace(rawProxy)
 
 	if rawProxy == "" {
@@ -560,12 +892,12 @@ func parseSocks5ProxyURL(rawProxy string) (*url.URL, error) {
 		)
 	}
 
-	proxyURL.Scheme =
-		strings.ToLower(proxyURL.Scheme)
+	proxyURL.Scheme = strings.ToLower(
+		proxyURL.Scheme,
+	)
 
 	if proxyURL.Scheme != "socks5" &&
 		proxyURL.Scheme != "socks5h" {
-
 		return nil, fmt.Errorf(
 			"unsupported proxy scheme %q: only socks5 and socks5h are supported",
 			proxyURL.Scheme,
@@ -593,7 +925,6 @@ func (p *Proxy) isDomainAllowed(
 func (p *Proxy) checkDomain(
 	targetURL *url.URL,
 ) error {
-
 	if p.isDomainAllowed(targetURL) {
 		return nil
 	}
@@ -607,11 +938,8 @@ func (p *Proxy) checkRedirect(
 	req *http.Request,
 	via []*http.Request,
 ) error {
-
 	if len(via) >= 10 {
-		return errors.New(
-			"stopped after 10 redirects",
-		)
+		return errors.New("stopped after 10 redirects")
 	}
 
 	return p.checkDomain(req.URL)
@@ -636,9 +964,7 @@ func isDomainAllowed(
 	host string,
 	whitelist []domainRule,
 ) bool {
-
-	target :=
-		normalizeTargetHostPort(host, "")
+	target := normalizeTargetHostPort(host, "")
 
 	return isDomainTargetAllowed(
 		target,
@@ -650,12 +976,10 @@ func isDomainURLAllowed(
 	targetURL *url.URL,
 	whitelist []domainRule,
 ) bool {
-
-	target :=
-		normalizeTargetHostPort(
-			targetURL.Host,
-			targetURL.Scheme,
-		)
+	target := normalizeTargetHostPort(
+		targetURL.Host,
+		targetURL.Scheme,
+	)
 
 	return isDomainTargetAllowed(
 		target,
@@ -667,7 +991,6 @@ func isDomainTargetAllowed(
 	target domainTarget,
 	whitelist []domainRule,
 ) bool {
-
 	if len(whitelist) == 0 {
 		return true
 	}
@@ -675,7 +998,6 @@ func isDomainTargetAllowed(
 	allowed := false
 
 	for _, rule := range whitelist {
-
 		if !rule.matches(target) {
 			continue
 		}
@@ -693,17 +1015,11 @@ func isDomainTargetAllowed(
 func normalizeDomainWhitelist(
 	entries []string,
 ) []domainRule {
-
-	whitelist :=
-		make([]domainRule, 0, len(entries))
-
-	seen :=
-		make(map[string]struct{}, len(entries))
+	whitelist := make([]domainRule, 0, len(entries))
+	seen := make(map[string]struct{}, len(entries))
 
 	for _, entry := range entries {
-
-		rule, ok :=
-			normalizeDomainRule(entry)
+		rule, ok := normalizeDomainRule(entry)
 
 		if !ok {
 			continue
@@ -716,9 +1032,7 @@ func normalizeDomainWhitelist(
 		}
 
 		seen[key] = struct{}{}
-
-		whitelist =
-			append(whitelist, rule)
+		whitelist = append(whitelist, rule)
 	}
 
 	return whitelist
@@ -727,21 +1041,17 @@ func normalizeDomainWhitelist(
 func normalizeDomainRule(
 	entry string,
 ) (domainRule, bool) {
-
 	entry = strings.TrimSpace(entry)
 
 	exclude := strings.HasPrefix(entry, "-")
 
 	if exclude {
-		entry =
-			strings.TrimSpace(
-				strings.TrimPrefix(entry, "-"),
-			)
+		entry = strings.TrimSpace(
+			strings.TrimPrefix(entry, "-"),
+		)
 	}
 
-	host, port :=
-		splitDomainRulePort(entry)
-
+	host, port := splitDomainRulePort(entry)
 	host = normalizeDomain(host)
 
 	if host == "" {
@@ -755,8 +1065,7 @@ func normalizeDomainRule(
 	}
 
 	if strings.ContainsAny(host, "*?") {
-		rule.regexp =
-			compileDomainWildcard(host)
+		rule.regexp = compileDomainWildcard(host)
 	}
 
 	return rule, true
@@ -765,18 +1074,14 @@ func normalizeDomainRule(
 func splitDomainRulePort(
 	entry string,
 ) (string, string) {
-
-	if host, port, err :=
-		net.SplitHostPort(entry); err == nil {
+	if host, port, err := net.SplitHostPort(entry); err == nil {
 		return host, normalizePort(port)
 	}
 
 	if strings.Count(entry, ":") == 1 {
-
 		idx := strings.LastIndex(entry, ":")
 
-		port :=
-			normalizePort(entry[idx+1:])
+		port := normalizePort(entry[idx+1:])
 
 		if port != "" {
 			return entry[:idx], port
@@ -787,7 +1092,6 @@ func splitDomainRulePort(
 }
 
 func normalizePort(port string) string {
-
 	port = strings.TrimSpace(port)
 
 	if port == "" {
@@ -795,7 +1099,6 @@ func normalizePort(port string) string {
 	}
 
 	for _, r := range port {
-
 		if r < '0' || r > '9' {
 			return ""
 		}
@@ -807,15 +1110,12 @@ func normalizePort(port string) string {
 func compileDomainWildcard(
 	pattern string,
 ) *regexp.Regexp {
-
 	var b strings.Builder
 
 	b.WriteString("^")
 
 	for _, r := range pattern {
-
 		switch r {
-
 		case '*':
 			b.WriteString(".*")
 
@@ -824,38 +1124,27 @@ func compileDomainWildcard(
 
 		default:
 			b.WriteString(
-				regexp.QuoteMeta(
-					string(r),
-				),
+				regexp.QuoteMeta(string(r)),
 			)
 		}
 	}
 
 	b.WriteString("$")
 
-	return regexp.MustCompile(
-		b.String(),
-	)
+	return regexp.MustCompile(b.String())
 }
 
 func (r domainRule) key() string {
-
 	if r.exclude {
-		return "-" +
-			r.pattern +
-			":" +
-			r.port
+		return "-" + r.pattern + ":" + r.port
 	}
 
-	return r.pattern +
-		":" +
-		r.port
+	return r.pattern + ":" + r.port
 }
 
 func (r domainRule) matches(
 	target domainTarget,
 ) bool {
-
 	if !r.matchesHost(target.host) {
 		return false
 	}
@@ -866,7 +1155,6 @@ func (r domainRule) matches(
 func (r domainRule) matchesHost(
 	host string,
 ) bool {
-
 	if r.regexp != nil {
 		return r.regexp.MatchString(host)
 	}
@@ -881,7 +1169,6 @@ func (r domainRule) matchesHost(
 func (r domainRule) matchesPort(
 	port string,
 ) bool {
-
 	if r.port == "0" {
 		return true
 	}
@@ -904,7 +1191,6 @@ func normalizeTargetHostPort(
 	rawHost,
 	scheme string,
 ) domainTarget {
-
 	host := rawHost
 	port := ""
 
@@ -915,16 +1201,10 @@ func normalizeTargetHostPort(
 		port = parsedPort
 
 	} else if strings.Count(rawHost, ":") == 1 {
-
-		idx := strings.LastIndex(
-			rawHost,
-			":",
-		)
+		idx := strings.LastIndex(rawHost, ":")
 
 		if parsedPort :=
-			normalizePort(
-				rawHost[idx+1:],
-			); parsedPort != "" {
+			normalizePort(rawHost[idx+1:]); parsedPort != "" {
 
 			host = rawHost[:idx]
 			port = parsedPort
@@ -942,9 +1222,7 @@ func normalizeTargetHostPort(
 }
 
 func defaultPort(scheme string) string {
-
 	switch strings.ToLower(scheme) {
-
 	case "http":
 		return "80"
 
@@ -957,33 +1235,25 @@ func defaultPort(scheme string) string {
 }
 
 func normalizeDomain(domain string) string {
+	domain = strings.Trim(
+		strings.ToLower(strings.TrimSpace(domain)),
+		".",
+	)
 
-	domain =
-		strings.Trim(
-			strings.ToLower(
-				strings.TrimSpace(domain),
-			),
-			".",
-		)
-
-	domain =
-		strings.TrimPrefix(
-			strings.TrimSuffix(domain, "]"),
-			"[",
-		)
+	domain = strings.TrimPrefix(
+		strings.TrimSuffix(domain, "]"),
+		"[",
+	)
 
 	if domain == "" {
 		return ""
 	}
 
-	if host, _, err :=
-		net.SplitHostPort(domain); err == nil {
-
-		domain =
-			strings.Trim(
-				strings.ToLower(host),
-				".",
-			)
+	if host, _, err := net.SplitHostPort(domain); err == nil {
+		domain = strings.Trim(
+			strings.ToLower(host),
+			".",
+		)
 	}
 
 	return domain
