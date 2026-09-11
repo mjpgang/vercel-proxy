@@ -1,9 +1,6 @@
 package api
 
 import (
-	"bytes"
-	"compress/gzip"
-	"compress/zlib"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,17 +10,12 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
-	"strconv"
 	"strings"
-
-	"github.com/andybalholm/brotli"
-	"golang.org/x/net/html"
 )
 
 const (
-	githubRepoURL     = "https://github.com/tbxark/vercel-proxy"
-	identityEncoding  = "identity"
-	proxyTargetCookie = "__koyota_proxy_target"
+	githubRepoURL    = "https://github.com/tbxark/vercel-proxy"
+	identityEncoding = "identity"
 
 	corsAllowOrigin  = "*"
 	corsAllowMethods = "POST, GET, OPTIONS, PUT, DELETE"
@@ -655,17 +647,6 @@ func (p *Proxy) ServeHTTP(
 		parseTargetURL(rawURL)
 
 	if err != nil {
-		if cookie, cookieErr := r.Cookie(proxyTargetCookie); cookieErr == nil {
-			if savedTarget, decodeErr := url.QueryUnescape(cookie.Value); decodeErr == nil {
-				if baseURL, baseErr := parseTargetURL(savedTarget); baseErr == nil {
-					targetURL = baseURL.ResolveReference(r.URL)
-					err = nil
-				}
-			}
-		}
-	}
-
-	if err != nil {
 
 		http.Error(
 			w,
@@ -802,7 +783,7 @@ func (p *Proxy) proxyRequest(
 		r.Header,
 		req.Header,
 	)
-	removeProxyTargetCookie(req.Header)
+	rewriteUpstreamRequestHeaders(req, targetURL)
 
 	if p.disableCompression {
 
@@ -912,11 +893,6 @@ func proxyRaw(
 		setCORSHeaders(w)
 	}
 
-	w.Header().Add(
-		"Set-Cookie",
-		proxyTargetCookie+"="+url.QueryEscape(currentTarget.String())+"; Path=/; HttpOnly; SameSite=Lax",
-	)
-
 	cookies := w.Header().Values("Set-Cookie")
 	w.Header().Del("Set-Cookie")
 	for _, cookie := range cookies {
@@ -976,28 +952,6 @@ func proxyRaw(
 		}
 	}
 
-	if refresh := resp.Header.Get("Refresh"); refresh != "" {
-		if rewritten, ok := rewriteRefresh(refresh, currentTarget, randomID); ok {
-			w.Header().Set("Refresh", rewritten)
-		}
-	}
-
-	body, transformed, err := rewriteResponseBody(resp, currentTarget, randomID)
-	if err != nil {
-		return err
-	}
-	if transformed {
-		w.Header().Del("Content-Encoding")
-		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
-		w.Header().Del("ETag")
-		w.Header().Del("Content-MD5")
-	}
-
-	if w.Header().Get("Content-Security-Policy") != "" || w.Header().Get("Content-Security-Policy-Report-Only") != "" {
-		w.Header().Del("Content-Security-Policy")
-		w.Header().Del("Content-Security-Policy-Report-Only")
-	}
-
 	if w.Header().Get("Referer") != "" {
 
 		w.Header().Del("Referer")
@@ -1012,172 +966,9 @@ func proxyRaw(
 		resp.StatusCode,
 	)
 
-	if transformed {
-		_, err = w.Write(body)
-	} else {
-		_, err = io.Copy(w, resp.Body)
-	}
+	_, err := io.Copy(w, resp.Body)
 
 	return err
-}
-
-func rewriteResponseBody(
-	resp *http.Response,
-	baseURL *url.URL,
-	randomID string,
-) ([]byte, bool, error) {
-	contentType := strings.ToLower(strings.TrimSpace(strings.Split(resp.Header.Get("Content-Type"), ";")[0]))
-	isHTML := contentType == "text/html" || contentType == "application/xhtml+xml"
-	isCSS := contentType == "text/css"
-	if !isHTML && !isCSS {
-		return nil, false, nil
-	}
-	encoding := strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Encoding")))
-	if encoding != "" && encoding != "gzip" && encoding != "x-gzip" && encoding != "deflate" && encoding != "br" {
-		return nil, false, nil
-	}
-
-	body, err := decodeResponseBody(resp)
-	if err != nil {
-		return nil, false, err
-	}
-
-	if isHTML {
-		doc, err := html.Parse(bytes.NewReader(body))
-		if err != nil {
-			return nil, false, err
-		}
-		rewriteHTMLNodes(doc, baseURL, randomID)
-		var output bytes.Buffer
-		if err := html.Render(&output, doc); err != nil {
-			return nil, false, err
-		}
-		return output.Bytes(), true, nil
-	}
-
-	return rewriteCSS(body, baseURL, randomID), true, nil
-}
-
-func decodeResponseBody(resp *http.Response) ([]byte, error) {
-	encoding := strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Encoding")))
-	if encoding == "" {
-		return io.ReadAll(resp.Body)
-	}
-
-	var reader io.Reader
-	var closer io.Closer
-	switch encoding {
-	case "gzip", "x-gzip":
-		gzipReader, err := gzip.NewReader(resp.Body)
-		if err != nil {
-			return nil, err
-		}
-		reader = gzipReader
-		closer = gzipReader
-	case "deflate":
-		zlibReader, err := zlib.NewReader(resp.Body)
-		if err != nil {
-			return nil, err
-		}
-		reader = zlibReader
-		closer = zlibReader
-	case "br":
-		reader = brotli.NewReader(resp.Body)
-	default:
-		return io.ReadAll(resp.Body)
-	}
-	if closer != nil {
-		defer closer.Close()
-	}
-	return io.ReadAll(reader)
-}
-
-func rewriteHTMLNodes(node *html.Node, baseURL *url.URL, randomID string) {
-	if node.Type == html.TextNode && node.Parent != nil && strings.EqualFold(node.Parent.Data, "style") {
-		node.Data = string(rewriteCSS([]byte(node.Data), baseURL, randomID))
-	} else if node.Type == html.TextNode && node.Parent != nil && strings.EqualFold(node.Parent.Data, "script") {
-		node.Data = rewriteScriptURLs(node.Data, baseURL, randomID)
-	}
-	if node.Type == html.ElementNode {
-		for i := range node.Attr {
-			if node.Attr[i].Key == "src" || node.Attr[i].Key == "href" || node.Attr[i].Key == "action" || node.Attr[i].Key == "poster" || node.Attr[i].Key == "cite" {
-				node.Attr[i].Val = proxyReference(node.Attr[i].Val, baseURL, randomID)
-			} else if node.Attr[i].Key == "srcset" {
-				node.Attr[i].Val = rewriteSrcset(node.Attr[i].Val, baseURL, randomID)
-			} else if node.Attr[i].Key == "style" {
-				node.Attr[i].Val = string(rewriteCSS([]byte(node.Attr[i].Val), baseURL, randomID))
-			}
-		}
-	}
-	for child := node.FirstChild; child != nil; child = child.NextSibling {
-		rewriteHTMLNodes(child, baseURL, randomID)
-	}
-}
-
-var scriptRootURLPattern = regexp.MustCompile(`(["'` + "`" + `])(/[^/][^/"'` + "`" + `]*)["'` + "`" + `]`)
-
-func rewriteScriptURLs(value string, baseURL *url.URL, randomID string) string {
-	return scriptRootURLPattern.ReplaceAllStringFunc(value, func(match string) string {
-		parts := scriptRootURLPattern.FindStringSubmatch(match)
-		return parts[1] + proxyReference(parts[2], baseURL, randomID) + match[len(match)-1:]
-	})
-}
-
-func rewriteSrcset(value string, baseURL *url.URL, randomID string) string {
-	parts := strings.Split(value, ",")
-	for i, part := range parts {
-		fields := strings.Fields(strings.TrimSpace(part))
-		if len(fields) > 0 {
-			fields[0] = proxyReference(fields[0], baseURL, randomID)
-			parts[i] = strings.Join(fields, " ")
-		}
-	}
-	return strings.Join(parts, ", ")
-}
-
-var cssURLPattern = regexp.MustCompile(`(?is)url\(\s*(["']?)([^"')]+)["']?\s*\)`)
-var cssImportPattern = regexp.MustCompile(`(?is)(@import\s+)(["'])([^"']+)(["'])`)
-
-func rewriteCSS(body []byte, baseURL *url.URL, randomID string) []byte {
-	text := string(body)
-	text = cssURLPattern.ReplaceAllStringFunc(text, func(match string) string {
-		submatch := cssURLPattern.FindStringSubmatch(match)
-		return "url(" + submatch[1] + proxyReference(submatch[2], baseURL, randomID) + submatch[1] + ")"
-	})
-	text = cssImportPattern.ReplaceAllStringFunc(text, func(match string) string {
-		submatch := cssImportPattern.FindStringSubmatch(match)
-		return submatch[1] + submatch[2] + proxyReference(submatch[3], baseURL, randomID) + submatch[4]
-	})
-	return []byte(text)
-}
-
-func proxyReference(reference string, baseURL *url.URL, randomID string) string {
-	trimmed := strings.TrimSpace(reference)
-	parsed, err := url.Parse(trimmed)
-	if err != nil || parsed.Scheme == "data" || parsed.Scheme == "javascript" || parsed.Scheme == "mailto" || parsed.Scheme == "tel" || strings.HasPrefix(trimmed, "#") {
-		return reference
-	}
-	resolved := baseURL.ResolveReference(parsed)
-	if resolved.Scheme != "http" && resolved.Scheme != "https" {
-		return reference
-	}
-	if randomID != "" {
-		return buildRandomProxyURL(randomID, resolved)
-	}
-	return buildLegacyProxyURL(resolved)
-}
-
-func rewriteRefresh(value string, baseURL *url.URL, randomID string) (string, bool) {
-	parts := strings.SplitN(value, ";", 2)
-	if len(parts) != 2 {
-		return value, false
-	}
-	fields := strings.SplitN(strings.TrimSpace(parts[1]), "=", 2)
-	if len(fields) != 2 || !strings.EqualFold(strings.TrimSpace(fields[0]), "url") {
-		return value, false
-	}
-	reference := strings.Trim(strings.TrimSpace(fields[1]), "\"'")
-	return parts[0] + "; url=" + proxyReference(reference, baseURL, randomID), true
 }
 
 func rewriteSetCookie(value string, randomID string) string {
@@ -1361,20 +1152,18 @@ func copyHeaders(
 	}
 }
 
-func removeProxyTargetCookie(header http.Header) {
-	values := header.Values("Cookie")
-	header.Del("Cookie")
-	for _, value := range values {
-		cookies := make([]string, 0)
-		for _, item := range strings.Split(value, ";") {
-			item = strings.TrimSpace(item)
-			if item == "" || strings.HasPrefix(item, proxyTargetCookie+"=") {
-				continue
-			}
-			cookies = append(cookies, item)
-		}
-		if len(cookies) > 0 {
-			header.Add("Cookie", strings.Join(cookies, "; "))
+func rewriteUpstreamRequestHeaders(req *http.Request, targetURL *url.URL) {
+	req.Host = targetURL.Host
+	req.Header.Del("Host")
+
+	if origin := req.Header.Get("Origin"); origin != "" {
+		req.Header.Set("Origin", targetURL.Scheme+"://"+targetURL.Host)
+	}
+	if referer := req.Header.Get("Referer"); referer != "" {
+		if parsed, err := url.Parse(referer); err == nil && parsed.Host != "" {
+			parsed.Scheme = targetURL.Scheme
+			parsed.Host = targetURL.Host
+			req.Header.Set("Referer", parsed.String())
 		}
 	}
 }

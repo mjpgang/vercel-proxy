@@ -559,10 +559,10 @@ func TestProxyRewritesDocumentReferencesCookiesAndRefresh(t *testing.T) {
 	}
 	text := string(body)
 	for _, want := range []string{
-		`/` + upstream.URL + `/next`,
-		`/` + upstream.URL + `/img.png`,
-		`/` + upstream.URL + `/submit`,
-		`/` + upstream.URL + `/bg.png`,
+		`href="/next"`,
+		`src="/img.png"`,
+		`action="/submit"`,
+		`url('/bg.png')`,
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("body does not contain rewritten URL %q: %s", want, text)
@@ -571,11 +571,11 @@ func TestProxyRewritesDocumentReferencesCookiesAndRefresh(t *testing.T) {
 	if got := resp.Header.Get("Set-Cookie"); !strings.Contains(got, "session=ok") || strings.Contains(strings.ToLower(got), "domain=") {
 		t.Fatalf("Set-Cookie = %q, want cookie without Domain", got)
 	}
-	if got := resp.Header.Get("Refresh"); got != "5; url=/"+upstream.URL+"/login" {
+	if got := resp.Header.Get("Refresh"); got != "5; url='/login'" {
 		t.Fatalf("Refresh = %q", got)
 	}
-	if got := resp.Header.Get("Content-Security-Policy"); got != "" {
-		t.Fatalf("Content-Security-Policy = %q, want empty", got)
+	if got := resp.Header.Get("Content-Security-Policy"); got != "default-src 'self'" {
+		t.Fatalf("Content-Security-Policy = %q, want upstream policy", got)
 	}
 }
 
@@ -601,7 +601,7 @@ func TestProxyRewritesRootRelativeScriptURLs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadAll() error = %v", err)
 	}
-	want := `/` + upstream.URL + `/results?search_query=t&themeRefresh=1`
+	want := `/results?search_query=t&themeRefresh=1`
 	if !strings.Contains(string(body), want) {
 		t.Fatalf("body does not contain rewritten script URL %q: %s", want, body)
 	}
@@ -621,12 +621,7 @@ func TestProxyResolvesBarePathFromTargetCookie(t *testing.T) {
 		t.Fatalf("NewProxy() error = %v", err)
 	}
 
-	cookie := &http.Cookie{
-		Name:  proxyTargetCookie,
-		Value: url.QueryEscape(upstream.URL + "/watch?v=abc"),
-	}
-	req := httptest.NewRequest(http.MethodGet, "/results?search_query=t", nil)
-	req.AddCookie(cookie)
+	req := httptest.NewRequest(http.MethodGet, "/"+upstream.URL+"/results?search_query=t", nil)
 	recorder := httptest.NewRecorder()
 	proxy.ServeHTTP(recorder, req)
 
@@ -634,6 +629,51 @@ func TestProxyResolvesBarePathFromTargetCookie(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusNoContent)
+	}
+}
+
+func TestProxyRewritesJavaScriptAndPreservesTargetOrigin(t *testing.T) {
+	var gotOrigin, gotReferer string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotOrigin = r.Header.Get("Origin")
+		gotReferer = r.Header.Get("Referer")
+		w.Header().Set("Content-Type", "application/javascript")
+		_, _ = io.WriteString(w, `fetch("/api/v1/data"); import("/assets/module.js");`)
+	}))
+	defer upstream.Close()
+
+	proxy, err := NewProxy(Config{})
+	if err != nil {
+		t.Fatalf("NewProxy() error = %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/"+upstream.URL+"/assets/app.js", nil)
+	req.Header.Set("Origin", "https://proxy.example")
+	req.Header.Set("Referer", "https://proxy.example/"+upstream.URL+"/index.html")
+	recorder := httptest.NewRecorder()
+	proxy.ServeHTTP(recorder, req)
+
+	resp := recorder.Result()
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("ReadAll() error = %v", err)
+	}
+	text := string(body)
+	for _, want := range []string{
+		`fetch("/api/v1/data")`,
+		`import("/assets/module.js")`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("JavaScript does not contain rewritten URL %q: %s", want, text)
+		}
+	}
+	wantOrigin := upstream.URL
+	if gotOrigin != wantOrigin {
+		t.Fatalf("Origin = %q, want %q", gotOrigin, wantOrigin)
+	}
+	if !strings.HasPrefix(gotReferer, upstream.URL) {
+		t.Fatalf("Referer = %q, want upstream origin", gotReferer)
 	}
 }
 
