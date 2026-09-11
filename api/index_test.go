@@ -93,7 +93,7 @@ func TestProxyHandlesPreflightByDefault(t *testing.T) {
 	}
 }
 
-func TestHandlerRedirectsRoot(t *testing.T) {
+func TestHandlerServesKoyotaHub(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	recorder := httptest.NewRecorder()
 
@@ -102,11 +102,18 @@ func TestHandlerRedirectsRoot(t *testing.T) {
 	resp := recorder.Result()
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusMovedPermanently {
-		t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusMovedPermanently)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusOK)
 	}
-	if got := resp.Header.Get("Location"); got != githubRepoURL {
-		t.Fatalf("Location = %q, want %q", got, githubRepoURL)
+	if got := resp.Header.Get("Content-Type"); got != "text/html; charset=utf-8" {
+		t.Fatalf("Content-Type = %q, want HTML", got)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("ReadAll() error = %v", err)
+	}
+	if !strings.Contains(string(body), "Koyota HUB") {
+		t.Fatal("root response does not contain Koyota HUB")
 	}
 }
 
@@ -522,6 +529,53 @@ func TestProxyStopsSelfRedirect(t *testing.T) {
 	}
 	if got := resp.Header.Get("Location"); got != "" {
 		t.Fatalf("Location = %q, want empty self-redirect", got)
+	}
+}
+
+func TestProxyRewritesDocumentReferencesCookiesAndRefresh(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Set-Cookie", "session=ok; Domain=upstream.invalid; Path=/")
+		w.Header().Set("Refresh", "5; url='/login'")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'")
+		_, _ = io.WriteString(w, `<a href="/next">next</a><img src="/img.png"><form action="/submit"></form><style>body{background:url('/bg.png')}</style>`)
+	}))
+	defer upstream.Close()
+
+	proxy, err := NewProxy(Config{})
+	if err != nil {
+		t.Fatalf("NewProxy() error = %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/"+upstream.URL+"/index.html", nil)
+	recorder := httptest.NewRecorder()
+	proxy.ServeHTTP(recorder, req)
+
+	resp := recorder.Result()
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("ReadAll() error = %v", err)
+	}
+	text := string(body)
+	for _, want := range []string{
+		`/` + upstream.URL + `/next`,
+		`/` + upstream.URL + `/img.png`,
+		`/` + upstream.URL + `/submit`,
+		`/` + upstream.URL + `/bg.png`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("body does not contain rewritten URL %q: %s", want, text)
+		}
+	}
+	if got := resp.Header.Get("Set-Cookie"); !strings.Contains(got, "session=ok") || strings.Contains(strings.ToLower(got), "domain=") {
+		t.Fatalf("Set-Cookie = %q, want cookie without Domain", got)
+	}
+	if got := resp.Header.Get("Refresh"); got != "5; url=/"+upstream.URL+"/login" {
+		t.Fatalf("Refresh = %q", got)
+	}
+	if got := resp.Header.Get("Content-Security-Policy"); got != "" {
+		t.Fatalf("Content-Security-Policy = %q, want empty", got)
 	}
 }
 
