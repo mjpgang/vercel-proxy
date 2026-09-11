@@ -463,7 +463,7 @@ func TestProxyKeepsRelativeRedirectInsideProxy(t *testing.T) {
 	}
 }
 
-func TestRandomProxyKeepsRelativeRedirectInsideProxy(t *testing.T) {
+func TestCreateProxyKeepsRelativeRedirectInsideProxy(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/results?search_query=%40&themeRefresh=1", http.StatusFound)
 	}))
@@ -483,16 +483,16 @@ func TestRandomProxyKeepsRelativeRedirectInsideProxy(t *testing.T) {
 	proxy.ServeHTTP(createRecorder, createReq)
 
 	var created struct {
-		ID string `json:"id"`
+		URL string `json:"url"`
 	}
 	if err := json.NewDecoder(createRecorder.Result().Body).Decode(&created); err != nil {
 		t.Fatalf("create response error = %v", err)
 	}
-	if created.ID == "" {
-		t.Fatal("create response has empty id")
+	if created.URL == "" {
+		t.Fatal("create response has empty url")
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/"+created.ID, nil)
+	req := httptest.NewRequest(http.MethodGet, created.URL, nil)
 	recorder := httptest.NewRecorder()
 	proxy.ServeHTTP(recorder, req)
 
@@ -501,7 +501,7 @@ func TestRandomProxyKeepsRelativeRedirectInsideProxy(t *testing.T) {
 	if resp.StatusCode != http.StatusFound {
 		t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusFound)
 	}
-	wantLocation := "/" + created.ID + "/results?search_query=%40&themeRefresh=1"
+	wantLocation := "/" + upstream.URL + "/results?search_query=%40&themeRefresh=1"
 	if got := resp.Header.Get("Location"); got != wantLocation {
 		t.Fatalf("Location = %q, want %q", got, wantLocation)
 	}

@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"compress/gzip"
 	"compress/zlib"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,7 +15,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"sync"
 
 	"github.com/andybalholm/brotli"
 	"golang.org/x/net/html"
@@ -35,9 +32,6 @@ const (
 var (
 	proxyURLPattern = regexp.MustCompile(`^/*(https?:)/*`)
 	defaultProxy    = mustNewProxy(Config{})
-
-	randomTargets   = make(map[string]string)
-	randomTargetsMu sync.RWMutex
 )
 
 const indexHTML = `<!doctype html>
@@ -319,7 +313,7 @@ a{
 
 	<p>
 		Enter a URL below and open it through the proxy.
-		A random access URL will be generated automatically.
+		A direct proxy URL will be generated automatically.
 	</p>
 
 	<div class="box">
@@ -450,7 +444,7 @@ async function openProxy(){
 		button.textContent = "CREATING";
 
 		status(
-			"Creating random proxy URL...",
+			"Opening proxy URL...",
 			false
 		);
 
@@ -633,7 +627,7 @@ func (p *Proxy) ServeHTTP(
 	}
 
 	/*
-		CREATE RANDOM URL
+		CREATE PROXY URL
 
 		/create?url=https://example.com
 	*/
@@ -643,27 +637,6 @@ func (p *Proxy) ServeHTTP(
 		p.handleCreate(
 			w,
 			r,
-		)
-
-		return
-	}
-
-	/*
-		RANDOM PROXY URL
-
-		/abc123def456
-		/abc123def456/search?q=test
-	*/
-
-	if target, id, suffix, ok :=
-		getRandomTarget(r.URL.Path); ok {
-
-		p.serveRandomTarget(
-			w,
-			r,
-			target,
-			id,
-			suffix,
 		)
 
 		return
@@ -767,29 +740,8 @@ func (p *Proxy) handleCreate(
 		return
 	}
 
-	id, err := newRandomID()
-
-	if err != nil {
-
-		http.Error(
-			w,
-			"failed to generate id",
-			http.StatusInternalServerError,
-		)
-
-		return
-	}
-
-	randomTargetsMu.Lock()
-
-	randomTargets[id] =
-		targetURL.String()
-
-	randomTargetsMu.Unlock()
-
 	response := map[string]string{
-		"id":  id,
-		"url": "/" + id,
+		"url": buildLegacyProxyURL(targetURL),
 	}
 
 	w.Header().Set(
@@ -807,196 +759,6 @@ func (p *Proxy) handleCreate(
 	_ = json.NewEncoder(w).Encode(
 		response,
 	)
-}
-
-func newRandomID() (string, error) {
-
-	b := make([]byte, 8)
-
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-
-	return hex.EncodeToString(b)[:12], nil
-}
-
-/*
-	getRandomTarget
-
-	/path:
-		/abc123def456
-
-	/path with suffix:
-		/abc123def456/search?q=wtf
-
-	戻り値:
-	target = 元URL
-	id     = ランダムID
-	suffix = /search
-*/
-
-func getRandomTarget(
-	path string,
-) (target string, id string, suffix string, ok bool) {
-
-	clean := strings.TrimPrefix(
-		path,
-		"/",
-	)
-
-	if clean == "" {
-		return "", "", "", false
-	}
-
-	parts := strings.SplitN(
-		clean,
-		"/",
-		2,
-	)
-
-	id = parts[0]
-
-	if len(id) != 12 {
-		return "", "", "", false
-	}
-
-	randomTargetsMu.RLock()
-
-	target, exists :=
-		randomTargets[id]
-
-	randomTargetsMu.RUnlock()
-
-	if !exists {
-		return "", "", "", false
-	}
-
-	if len(parts) == 2 {
-
-		suffix = "/" + parts[1]
-
-	}
-
-	return target, id, suffix, true
-}
-
-func (p *Proxy) serveRandomTarget(
-	w http.ResponseWriter,
-	r *http.Request,
-	target string,
-	id string,
-	suffix string,
-) {
-
-	baseURL, err :=
-		url.Parse(target)
-
-	if err != nil {
-
-		http.Error(
-			w,
-			"invalid target",
-			http.StatusBadRequest,
-		)
-
-		return
-	}
-
-	/*
-		元URLのパスに、
-		ランダムURL側のsuffixを追加する。
-
-		例:
-
-		元:
-		https://google.com
-
-		アクセス:
-		/random/search?q=wtf
-
-		結果:
-		https://google.com/search?q=wtf
-	*/
-
-	if suffix != "" {
-
-		suffixURL, err :=
-			url.Parse(suffix)
-
-		if err != nil {
-
-			http.Error(
-				w,
-				"invalid path",
-				http.StatusBadRequest,
-			)
-
-			return
-		}
-
-		baseURL.Path =
-			joinProxyPath(
-				baseURL.Path,
-				suffixURL.Path,
-			)
-
-		baseURL.RawQuery =
-			suffixURL.RawQuery
-
-		baseURL.Fragment =
-			suffixURL.Fragment
-	}
-
-	if err := p.checkDomain(baseURL); err != nil {
-
-		http.Error(
-			w,
-			err.Error(),
-			http.StatusForbidden,
-		)
-
-		return
-	}
-
-	p.proxyRequest(
-		w,
-		r,
-		baseURL,
-		id,
-	)
-}
-
-func joinProxyPath(
-	base string,
-	suffix string,
-) string {
-
-	if base == "" {
-		base = "/"
-	}
-
-	if suffix == "" {
-		return base
-	}
-
-	if !strings.HasPrefix(base, "/") {
-		base = "/" + base
-	}
-
-	if !strings.HasPrefix(suffix, "/") {
-		suffix = "/" + suffix
-	}
-
-	if strings.HasSuffix(base, "/") &&
-		strings.HasPrefix(suffix, "/") {
-
-		return strings.TrimSuffix(
-			base,
-			"/",
-		) + suffix
-	}
-
-	return base + suffix
 }
 
 func (p *Proxy) proxyRequest(
