@@ -607,6 +607,36 @@ func TestProxyRewritesRootRelativeScriptURLs(t *testing.T) {
 	}
 }
 
+func TestProxyResolvesBarePathFromTargetCookie(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/results" {
+			t.Fatalf("Path = %q, want /results", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	proxy, err := NewProxy(Config{})
+	if err != nil {
+		t.Fatalf("NewProxy() error = %v", err)
+	}
+
+	cookie := &http.Cookie{
+		Name:  proxyTargetCookie,
+		Value: url.QueryEscape(upstream.URL + "/watch?v=abc"),
+	}
+	req := httptest.NewRequest(http.MethodGet, "/results?search_query=t", nil)
+	req.AddCookie(cookie)
+	recorder := httptest.NewRecorder()
+	proxy.ServeHTTP(recorder, req)
+
+	resp := recorder.Result()
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusNoContent)
+	}
+}
+
 func assertUpstreamErr(t *testing.T, upstreamErr <-chan error) {
 	t.Helper()
 

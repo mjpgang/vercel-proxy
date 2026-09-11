@@ -21,8 +21,9 @@ import (
 )
 
 const (
-	githubRepoURL    = "https://github.com/tbxark/vercel-proxy"
-	identityEncoding = "identity"
+	githubRepoURL     = "https://github.com/tbxark/vercel-proxy"
+	identityEncoding  = "identity"
+	proxyTargetCookie = "__koyota_proxy_target"
 
 	corsAllowOrigin  = "*"
 	corsAllowMethods = "POST, GET, OPTIONS, PUT, DELETE"
@@ -654,6 +655,17 @@ func (p *Proxy) ServeHTTP(
 		parseTargetURL(rawURL)
 
 	if err != nil {
+		if cookie, cookieErr := r.Cookie(proxyTargetCookie); cookieErr == nil {
+			if savedTarget, decodeErr := url.QueryUnescape(cookie.Value); decodeErr == nil {
+				if baseURL, baseErr := parseTargetURL(savedTarget); baseErr == nil {
+					targetURL = baseURL.ResolveReference(r.URL)
+					err = nil
+				}
+			}
+		}
+	}
+
+	if err != nil {
 
 		http.Error(
 			w,
@@ -790,6 +802,7 @@ func (p *Proxy) proxyRequest(
 		r.Header,
 		req.Header,
 	)
+	removeProxyTargetCookie(req.Header)
 
 	if p.disableCompression {
 
@@ -898,6 +911,11 @@ func proxyRaw(
 	if globalCORS {
 		setCORSHeaders(w)
 	}
+
+	w.Header().Add(
+		"Set-Cookie",
+		proxyTargetCookie+"="+url.QueryEscape(currentTarget.String())+"; Path=/; HttpOnly; SameSite=Lax",
+	)
 
 	cookies := w.Header().Values("Set-Cookie")
 	w.Header().Del("Set-Cookie")
@@ -1339,6 +1357,24 @@ func copyHeaders(
 		for _, vv := range v {
 
 			dst.Add(k, vv)
+		}
+	}
+}
+
+func removeProxyTargetCookie(header http.Header) {
+	values := header.Values("Cookie")
+	header.Del("Cookie")
+	for _, value := range values {
+		cookies := make([]string, 0)
+		for _, item := range strings.Split(value, ";") {
+			item = strings.TrimSpace(item)
+			if item == "" || strings.HasPrefix(item, proxyTargetCookie+"=") {
+				continue
+			}
+			cookies = append(cookies, item)
+		}
+		if len(cookies) > 0 {
+			header.Add("Cookie", strings.Join(cookies, "; "))
 		}
 	}
 }
