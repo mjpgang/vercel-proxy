@@ -500,6 +500,31 @@ func TestRandomProxyKeepsRelativeRedirectInsideProxy(t *testing.T) {
 	}
 }
 
+func TestProxyStopsSelfRedirect(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, r.URL.RequestURI(), http.StatusFound)
+	}))
+	defer upstream.Close()
+
+	proxy, err := NewProxy(Config{})
+	if err != nil {
+		t.Fatalf("NewProxy() error = %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/"+upstream.URL+"/results", nil)
+	recorder := httptest.NewRecorder()
+	proxy.ServeHTTP(recorder, req)
+
+	resp := recorder.Result()
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusFound)
+	}
+	if got := resp.Header.Get("Location"); got != "" {
+		t.Fatalf("Location = %q, want empty self-redirect", got)
+	}
+}
+
 func assertUpstreamErr(t *testing.T, upstreamErr <-chan error) {
 	t.Helper()
 

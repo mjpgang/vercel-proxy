@@ -1146,7 +1146,9 @@ func proxyRaw(
 					locationURL,
 				)
 
-			if randomID != "" {
+			if resolvedURL.String() == currentTarget.String() {
+				w.Header().Del("Location")
+			} else if randomID != "" {
 
 				/*
 					ランダムURLなら、
